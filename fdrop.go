@@ -1,296 +1,274 @@
 package main
 
 import (
-	"bufio"
+
+	"encoding/json"
 	"fmt"
 	"io"
+
 	"os"
 	"path/filepath"
-	"strings"
+	"strconv"
+
 	"time"
 )
 
-const (
-	stashFile = "/tmp/fdrop_stash"
-	logFile   = "/tmp/fdrop_log"
-	version   = "2.1.0"
-)
-
 type StashItem struct {
-	Name string
 	Path string
 }
 
-func main() {
-	args := os.Args
-	if len(args) < 2 {
-		printHelp()
-		return
-	}
+var (
+	homeDir, _       = os.UserHomeDir()
+	stashDir         = filepath.Join(homeDir, ".fdrop")
+	stashFilePath    = filepath.Join(stashDir, "stash.json")
+	logFilePath      = filepath.Join(stashDir, "log.txt")
+)
 
-	switch args[1] {
-	case "--help":
-		printHelp()
-	case "--version":
-		fmt.Println("fdrop version", version)
-	case "--logs":
-		showLogs()
-	case "stash":
-		showStash()
-	case "add":
-		addToStash(args[2:])
-	case "copy":
-		pasteFiles(args[2:], false)
-	case "move":
-		pasteFiles(args[2:], true)
-	case "paste":
-		pasteFiles([]string{}, false)
-	default:
-		fmt.Println("Unknown command:", args[1])
-		printHelp()
+func ensureDirs() {
+	os.MkdirAll(stashDir, 0755)
+}
+
+func writeLog(action, src, dest string) {
+	f, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		defer f.Close()
+		logLine := fmt.Sprintf("%s | %s | %s ➜ %s\n", time.Now().Format(time.RFC3339), action, src, dest)
+		f.WriteString(logLine)
 	}
 }
 
-func printHelp() {
-	fmt.Println(`fdrop - Clipboard-like file tool
-
-Commands:
-  fdrop add <file1> <file2> ...        Add file(s)/folder(s) to stash
-  fdrop copy <name|stash idx> [...]    Copy from stash to target or .
-  fdrop move <name|stash idx> [...]    Move from stash
-  fdrop paste                          Paste everything from stash
-  fdrop stash                          Show stashed files
-  fdrop --logs                         View action log
-  fdrop --help                         Show help
-  fdrop --version                      Show version`)
+func readStash() ([]StashItem, error) {
+	data, err := os.ReadFile(stashFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []StashItem{}, nil
+		}
+		return nil, err
+	}
+	var stash []StashItem
+	err = json.Unmarshal(data, &stash)
+	return stash, err
 }
 
-func logAction(entry string) {
-	ts := time.Now().Format("2006-01-02 15:04:05")
-	msg := fmt.Sprintf("[%s] %s\n", ts, entry)
-	f, _ := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	defer f.Close()
-	f.WriteString(msg)
+func writeStash(stash []StashItem) error {
+	data, err := json.MarshalIndent(stash, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(stashFilePath, data, 0644)
+}
+
+func addToStash(paths []string) {
+	ensureDirs()
+	stash, _ := readStash()
+	seen := map[string]bool{}
+
+	for _, item := range stash {
+		seen[item.Path] = true
+	}
+
+	for _, p := range paths {
+		abs, err := filepath.Abs(p)
+		if err != nil || abs == "." {
+			fmt.Printf("Invalid path: %s\n", p)
+			continue
+		}
+		if _, err := os.Stat(abs); os.IsNotExist(err) {
+			fmt.Printf("File not found: %s\n", p)
+			continue
+		}
+		if seen[abs] {
+			fmt.Printf("File already in stash from this directory: %s\n", abs)
+			continue
+		}
+
+		// Check if same base name exists
+		for _, existing := range stash {
+			if filepath.Base(existing.Path) == filepath.Base(abs) && existing.Path != abs {
+				fmt.Printf("Warning: Duplicate file name from different directory: %s (existing: %s)\n", abs, existing.Path)
+			}
+		}
+
+		stash = append(stash, StashItem{Path: abs})
+		fmt.Printf("Added: %s from %s\n", filepath.Base(abs), filepath.Dir(abs))
+	}
+	writeStash(stash)
+}
+
+func listStash() {
+	stash, _ := readStash()
+	for i, item := range stash {
+		fmt.Printf("%d. %s (from %s)\n", i+1, filepath.Base(item.Path), filepath.Dir(item.Path))
+	}
+}
+
+func resolveItems(args []string, stash []StashItem) ([]StashItem, []int) {
+	var result []StashItem
+	var indexes []int
+	for _, arg := range args {
+		i, err := strconv.Atoi(arg)
+		if err == nil && i > 0 && i <= len(stash) {
+			result = append(result, stash[i-1])
+			indexes = append(indexes, i-1)
+		} else {
+			found := false
+			for idx, item := range stash {
+				if filepath.Base(item.Path) == arg {
+					result = append(result, item)
+					indexes = append(indexes, idx)
+					found = true
+					break
+				}
+			}
+			if !found {
+				fmt.Printf("not found in stash: %s\n", arg)
+			}
+		}
+	}
+	return result, indexes
+}
+
+func copyFile(src, dest string) error {
+	srcF, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcF.Close()
+
+	info, err := srcF.Stat()
+	if err != nil {
+		return err
+	}
+
+	destF, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	defer destF.Close()
+
+	_, err = io.Copy(destF, srcF)
+	return err
+}
+
+func performAction(action string, args []string, keep bool) {
+	ensureDirs()
+	stash, _ := readStash()
+	target := "."
+	files := args
+
+	if len(args) > 1 {
+		if fi, err := os.Stat(args[len(args)-1]); err == nil && fi.IsDir() {
+			target = args[len(args)-1]
+			files = args[:len(args)-1]
+		}
+	}
+
+	items, indexes := resolveItems(files, stash)
+	var newStash []StashItem
+	for i, item := range stash {
+		shouldSkip := false
+		for _, idx := range indexes {
+			if idx == i {
+				shouldSkip = true
+				break
+			}
+		}
+		if !shouldSkip || keep {
+			newStash = append(newStash, item)
+		}
+	}
+
+	for _, item := range items {
+		destPath := filepath.Join(target, filepath.Base(item.Path))
+		if action == "move" {
+			err := os.Rename(item.Path, destPath)
+			if err != nil {
+				fmt.Printf("Error moving %s: %v\n", item.Path, err)
+				continue
+			}
+		} else {
+			err := copyFile(item.Path, destPath)
+			if err != nil {
+				fmt.Printf("Error copying %s: %v\n", item.Path, err)
+				continue
+			}
+		}
+		fmt.Printf("%s ➜ %s\n", filepath.Base(item.Path), filepath.Base(destPath))
+		writeLog(action, item.Path, destPath)
+	}
+	writeStash(newStash)
+}
+
+func cleanStash() {
+	_ = writeStash([]StashItem{})
+	fmt.Println("Stash cleaned.")
 }
 
 func showLogs() {
-	data, err := os.ReadFile(logFile)
+	data, err := os.ReadFile(logFilePath)
 	if err != nil {
-		fmt.Println("Failed to read log:", err)
+		fmt.Println("No logs found.")
 		return
 	}
 	fmt.Println(string(data))
 }
 
-func addToStash(paths []string) {
-	if len(paths) == 0 {
-		fmt.Println("Usage: fdrop add <file1> <file2> ...")
-		return
-	}
-	var added []string
-	for _, p := range paths {
-		absPath, err := filepath.Abs(p)
-		if err != nil {
-			fmt.Println("Error:", err)
-			continue
-		}
-		name := filepath.Base(absPath)
-		appendToStash(name, absPath)
-		added = append(added, name)
-	}
-	if len(added) > 0 {
-		logAction("Added to stash: " + strings.Join(added, ", "))
-	}
+func printHelp() {
+	fmt.Println(`fdrop - A clipboard-like file copy-paste tool for the terminal.
+
+Usage:
+  fdrop add <file|dir>...           Add files/directories to the stash.
+  fdrop copy <file|index> [dir]     Copy specific file(s) to target directory.
+  fdrop move <file|index> [dir]     Move specific file(s) to target directory.
+  fdrop paste [target_dir]          Copy all stashed files to directory.
+  fdrop stash                       List all stashed files.
+  fdrop stash keep <file|index> [dir]  Copy but retain file in stash.
+  fdrop clean                       Clear the stash.
+  fdrop --logs                      Show action logs.
+  fdrop --help                      Show this help.
+`)
 }
 
-func appendToStash(name, absPath string) {
-	f, _ := os.OpenFile(stashFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	defer f.Close()
-	f.WriteString(fmt.Sprintf("%s|%s\n", name, absPath))
-}
-
-func showStash() {
-	items := readStash()
-	if len(items) == 0 {
-		fmt.Println("Stash is empty.")
-		return
-	}
-	for i, item := range items {
-		fmt.Printf("%d. %s\n", i+1, item.Name)
-	}
-}
-
-func readStash() []StashItem {
-	var items []StashItem
-	f, err := os.Open(stashFile)
-	if err != nil {
-		return items
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		parts := strings.SplitN(scanner.Text(), "|", 2)
-		if len(parts) == 2 {
-			items = append(items, StashItem{parts[0], parts[1]})
-		}
-	}
-	return items
-}
-
-func writeStash(items []StashItem) {
-	f, _ := os.Create(stashFile)
-	defer f.Close()
-	for _, item := range items {
-		f.WriteString(fmt.Sprintf("%s|%s\n", item.Name, item.Path))
-	}
-}
-
-func pasteFiles(args []string, isMove bool) {
-	stash := readStash()
-	if len(stash) == 0 {
-		fmt.Println("Stash is empty.")
-		return
-	}
-
-	var selected []StashItem
-	var targetDir = "."
-
-	// Determine if indices or names are used
+func main() {
+	ensureDirs()
+	args := os.Args[1:]
 	if len(args) == 0 {
-		selected = stash
-	} else {
-		// Last argument could be a target dir
-		if len(args) > 1 && !strings.HasPrefix(args[len(args)-1], "stash") && !isStashIndex(args[len(args)-1]) {
-			targetDir = args[len(args)-1]
-			args = args[:len(args)-1]
-		}
-		if len(args) >= 1 && args[0] == "stash" {
-			selected = selectByIndex(args[1:], stash)
-		} else {
-			selected = selectByName(args, stash)
-		}
-	}
-
-	if len(selected) == 0 {
-		fmt.Println("No files matched in stash.")
+		printHelp()
 		return
 	}
 
-	var success []string
-	var remaining []StashItem
-	skip := make(map[string]bool)
-
-	for _, item := range selected {
-		dest := filepath.Join(targetDir, item.Name)
-		var err error
-		if isMove {
-			err = os.Rename(item.Path, dest)
+	switch args[0] {
+	case "add":
+		addToStash(args[1:])
+	case "stash":
+		if len(args) == 1 {
+			listStash()
+		} else if args[1] == "keep" {
+			performAction("copy", args[2:], true)
 		} else {
-			err = copyPath(item.Path, dest)
+			fmt.Println("Invalid command. Usage: fdrop stash keep <filename|index> [target_dir]")
 		}
-		if err != nil {
-			fmt.Printf("Failed: %s (%v)\n", item.Name, err)
-			continue
+	case "copy":
+		performAction("copy", args[1:], false)
+	case "move":
+		performAction("move", args[1:], false)
+	case "paste":
+		stash, _ := readStash()
+		names := []string{}
+		for i := range stash {
+			names = append(names, strconv.Itoa(i+1))
 		}
-		fmt.Printf("Pasted: %s\n", item.Name)
-		success = append(success, item.Name)
-		skip[item.Path] = true
-	}
-
-	for _, item := range stash {
-		if !skip[item.Path] {
-			remaining = append(remaining, item)
+		if len(args) > 1 {
+			names = args[1:]
 		}
+		performAction("copy", names, false)
+	case "clean":
+		cleanStash()
+	case "--logs":
+		showLogs()
+	case "--help":
+		printHelp()
+	default:
+		fmt.Println("Invalid command. Use fdrop --help.")
 	}
-	writeStash(remaining)
-
-	action := "Copied"
-	if isMove {
-		action = "Moved"
-	}
-	logAction(fmt.Sprintf("%s: %s", action, strings.Join(success, ", ")))
 }
-
-func isStashIndex(s string) bool {
-	for _, ch := range s {
-		if ch < '0' || ch > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func selectByName(names []string, stash []StashItem) []StashItem {
-	var selected []StashItem
-	nameSet := make(map[string]bool)
-	for _, n := range names {
-		nameSet[n] = true
-	}
-	for _, item := range stash {
-		if nameSet[item.Name] {
-			selected = append(selected, item)
-		}
-	}
-	return selected
-}
-
-func selectByIndex(indices []string, stash []StashItem) []StashItem {
-	var selected []StashItem
-	for _, idxStr := range indices {
-		var idx int
-		fmt.Sscanf(idxStr, "%d", &idx)
-		if idx >= 1 && idx <= len(stash) {
-			selected = append(selected, stash[idx-1])
-		}
-	}
-	return selected
-}
-
-func copyPath(src, dst string) error {
-	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return copyDir(src, dst)
-	}
-	return copyFile(src, dst)
-}
-
-func copyDir(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		rel, _ := filepath.Rel(src, path)
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
-		return copyFile(path, target)
-	})
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	if err != nil {
-		return err
-	}
-
-	srcInfo, err := os.Stat(src)
-	if err == nil {
-		os.Chmod(dst, srcInfo.Mode())
-	}
-	return nil
-}
-

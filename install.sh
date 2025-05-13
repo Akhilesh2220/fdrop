@@ -1,5 +1,5 @@
 #!/bin/bash
-
+go build -o fdrop fdrop.go
 # fdrop installation script
 BIN_DIR="/usr/local/bin"
 FILENAME="fdrop"
