@@ -1,161 +1,296 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
-	"os"
-	"time"
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
-const clipboardFile = "/tmp/fdrop_clipboard"
-const logFile = "/tmp/fdrop_log"
-const version = "1.0.0" // Update with your current version
+const (
+	stashFile = "/tmp/fdrop_stash"
+	logFile   = "/tmp/fdrop_log"
+	version   = "2.1.0"
+)
 
-func printHelp() {
-	fmt.Println(`fdrop - A clipboard-like file copy-paste tool for the terminal.
-
-Usage:
-  fdrop cp <file|dir>       Copy a file or directory to the clipboard.
-  fdrop paste [target_dir]   Paste the copied file into the target directory.
-
-Options:
-  --help    Show this help message.
-  --version Show the version of fdrop.
-`)
-}
-
-func printVersion() {
-	fmt.Printf("fdrop version %s\n", version)
-}
-
-func logAction(action string) {
-	// Open the log file in append mode, creating it if necessary
-	file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Println("Error opening log file:", err)
-		return
-	}
-	defer file.Close()
-
-	// Write the log action with a newline at the end
-	file.WriteString(fmt.Sprintf("%s\n%s\n\n", time.Now().Format(time.RFC1123), action))
-}
-
-func cp(filePath string) {
-	// Get the absolute file path
-	absPath, err := filepath.Abs(filePath)
-	if err != nil {
-		fmt.Println("Error getting absolute path:", err)
-		return
-	}
-
-	// Save the path to clipboard file
-	err = os.WriteFile(clipboardFile, []byte(absPath), 0644)
-	if err != nil {
-		fmt.Println("Error writing to clipboard file:", err)
-		return
-	}
-
-	// Log the action
-	logAction(fmt.Sprintf("Copied: %s", absPath))
-
-	fmt.Printf("Copied: %s\n", absPath)
-}
-
-func paste(targetDir string) {
-	// Read the clipboard file to get the copied file path
-	data, err := os.ReadFile(clipboardFile)
-	if err != nil {
-		fmt.Println("Error reading clipboard file:", err)
-		return
-	}
-	absPath := string(data)
-
-	// Check if target directory is provided, if not, use current directory
-	if targetDir == "" {
-		targetDir = "."
-	}
-
-	// Get the base file name
-	baseName := filepath.Base(absPath)
-
-	// Define the target path
-	targetPath := filepath.Join(targetDir, baseName)
-
-	// Copy or move the file
-	err = copyFile(absPath, targetPath)
-	if err != nil {
-		fmt.Println("Error pasting file:", err)
-		return
-	}
-
-	// Log the action
-	logAction(fmt.Sprintf("Pasted: %s to %s", baseName, targetDir))
-
-	fmt.Printf("Pasted: %s to %s\n", baseName, targetDir)
-}
-
-func copyFile(src, dst string) error {
-	// Open the source file
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("failed to open source file: %w", err)
-	}
-	defer sourceFile.Close()
-
-	// Create the destination file
-	destFile, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file: %w", err)
-	}
-	defer destFile.Close()
-
-	// Copy the content from source to destination
-	_, err = io.Copy(destFile, sourceFile)
-	if err != nil {
-		return fmt.Errorf("failed to copy file content: %w", err)
-	}
-
-	// Set the destination file permissions to match the source
-	sourceFileInfo, err := sourceFile.Stat()
-	if err != nil {
-		return fmt.Errorf("failed to stat source file: %w", err)
-	}
-	err = os.Chmod(dst, sourceFileInfo.Mode())
-	if err != nil {
-		return fmt.Errorf("failed to set permissions on destination file: %w", err)
-	}
-
-	return nil
+type StashItem struct {
+	Name string
+	Path string
 }
 
 func main() {
-	if len(os.Args) < 2 {
+	args := os.Args
+	if len(args) < 2 {
 		printHelp()
 		return
 	}
 
-	command := os.Args[1]
-	switch command {
-	case "cp":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: fdrop cp <file|dir>")
-			return
-		}
-		cp(os.Args[2])
-	case "paste":
-		targetDir := ""
-		if len(os.Args) > 2 {
-			targetDir = os.Args[2]
-		}
-		paste(targetDir)
+	switch args[1] {
 	case "--help":
 		printHelp()
 	case "--version":
-		printVersion()
+		fmt.Println("fdrop version", version)
+	case "--logs":
+		showLogs()
+	case "stash":
+		showStash()
+	case "add":
+		addToStash(args[2:])
+	case "copy":
+		pasteFiles(args[2:], false)
+	case "move":
+		pasteFiles(args[2:], true)
+	case "paste":
+		pasteFiles([]string{}, false)
 	default:
-		fmt.Println("Invalid command. Usage: fdrop cp <file|dir> or fdrop paste [target_dir]")
+		fmt.Println("Unknown command:", args[1])
+		printHelp()
 	}
+}
+
+func printHelp() {
+	fmt.Println(`fdrop - Clipboard-like file tool
+
+Commands:
+  fdrop add <file1> <file2> ...        Add file(s)/folder(s) to stash
+  fdrop copy <name|stash idx> [...]    Copy from stash to target or .
+  fdrop move <name|stash idx> [...]    Move from stash
+  fdrop paste                          Paste everything from stash
+  fdrop stash                          Show stashed files
+  fdrop --logs                         View action log
+  fdrop --help                         Show help
+  fdrop --version                      Show version`)
+}
+
+func logAction(entry string) {
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf("[%s] %s\n", ts, entry)
+	f, _ := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	defer f.Close()
+	f.WriteString(msg)
+}
+
+func showLogs() {
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		fmt.Println("Failed to read log:", err)
+		return
+	}
+	fmt.Println(string(data))
+}
+
+func addToStash(paths []string) {
+	if len(paths) == 0 {
+		fmt.Println("Usage: fdrop add <file1> <file2> ...")
+		return
+	}
+	var added []string
+	for _, p := range paths {
+		absPath, err := filepath.Abs(p)
+		if err != nil {
+			fmt.Println("Error:", err)
+			continue
+		}
+		name := filepath.Base(absPath)
+		appendToStash(name, absPath)
+		added = append(added, name)
+	}
+	if len(added) > 0 {
+		logAction("Added to stash: " + strings.Join(added, ", "))
+	}
+}
+
+func appendToStash(name, absPath string) {
+	f, _ := os.OpenFile(stashFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	defer f.Close()
+	f.WriteString(fmt.Sprintf("%s|%s\n", name, absPath))
+}
+
+func showStash() {
+	items := readStash()
+	if len(items) == 0 {
+		fmt.Println("Stash is empty.")
+		return
+	}
+	for i, item := range items {
+		fmt.Printf("%d. %s\n", i+1, item.Name)
+	}
+}
+
+func readStash() []StashItem {
+	var items []StashItem
+	f, err := os.Open(stashFile)
+	if err != nil {
+		return items
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		parts := strings.SplitN(scanner.Text(), "|", 2)
+		if len(parts) == 2 {
+			items = append(items, StashItem{parts[0], parts[1]})
+		}
+	}
+	return items
+}
+
+func writeStash(items []StashItem) {
+	f, _ := os.Create(stashFile)
+	defer f.Close()
+	for _, item := range items {
+		f.WriteString(fmt.Sprintf("%s|%s\n", item.Name, item.Path))
+	}
+}
+
+func pasteFiles(args []string, isMove bool) {
+	stash := readStash()
+	if len(stash) == 0 {
+		fmt.Println("Stash is empty.")
+		return
+	}
+
+	var selected []StashItem
+	var targetDir = "."
+
+	// Determine if indices or names are used
+	if len(args) == 0 {
+		selected = stash
+	} else {
+		// Last argument could be a target dir
+		if len(args) > 1 && !strings.HasPrefix(args[len(args)-1], "stash") && !isStashIndex(args[len(args)-1]) {
+			targetDir = args[len(args)-1]
+			args = args[:len(args)-1]
+		}
+		if len(args) >= 1 && args[0] == "stash" {
+			selected = selectByIndex(args[1:], stash)
+		} else {
+			selected = selectByName(args, stash)
+		}
+	}
+
+	if len(selected) == 0 {
+		fmt.Println("No files matched in stash.")
+		return
+	}
+
+	var success []string
+	var remaining []StashItem
+	skip := make(map[string]bool)
+
+	for _, item := range selected {
+		dest := filepath.Join(targetDir, item.Name)
+		var err error
+		if isMove {
+			err = os.Rename(item.Path, dest)
+		} else {
+			err = copyPath(item.Path, dest)
+		}
+		if err != nil {
+			fmt.Printf("Failed: %s (%v)\n", item.Name, err)
+			continue
+		}
+		fmt.Printf("Pasted: %s\n", item.Name)
+		success = append(success, item.Name)
+		skip[item.Path] = true
+	}
+
+	for _, item := range stash {
+		if !skip[item.Path] {
+			remaining = append(remaining, item)
+		}
+	}
+	writeStash(remaining)
+
+	action := "Copied"
+	if isMove {
+		action = "Moved"
+	}
+	logAction(fmt.Sprintf("%s: %s", action, strings.Join(success, ", ")))
+}
+
+func isStashIndex(s string) bool {
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func selectByName(names []string, stash []StashItem) []StashItem {
+	var selected []StashItem
+	nameSet := make(map[string]bool)
+	for _, n := range names {
+		nameSet[n] = true
+	}
+	for _, item := range stash {
+		if nameSet[item.Name] {
+			selected = append(selected, item)
+		}
+	}
+	return selected
+}
+
+func selectByIndex(indices []string, stash []StashItem) []StashItem {
+	var selected []StashItem
+	for _, idxStr := range indices {
+		var idx int
+		fmt.Sscanf(idxStr, "%d", &idx)
+		if idx >= 1 && idx <= len(stash) {
+			selected = append(selected, stash[idx-1])
+		}
+	}
+	return selected
+}
+
+func copyPath(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return copyDir(src, dst)
+	}
+	return copyFile(src, dst)
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		rel, _ := filepath.Rel(src, path)
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		return copyFile(path, target)
+	})
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	if err != nil {
+		return err
+	}
+
+	srcInfo, err := os.Stat(src)
+	if err == nil {
+		os.Chmod(dst, srcInfo.Mode())
+	}
+	return nil
 }
 
