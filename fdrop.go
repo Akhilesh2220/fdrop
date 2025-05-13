@@ -12,6 +12,10 @@ import (
 
 	"time"
 )
+const (
+	version = "2.0.0"
+)
+
 
 type StashItem struct {
 	Path string
@@ -212,6 +216,9 @@ func showLogs() {
 	}
 	fmt.Println(string(data))
 }
+func showVersion() {
+	fmt.Printf("fdrop version %s\n", version)
+}
 
 func printHelp() {
 	fmt.Println(`fdrop - A clipboard-like file copy-paste tool for the terminal.
@@ -225,7 +232,11 @@ Usage:
   fdrop stash keep <file|index> [dir]  Copy but retain file in stash.
   fdrop clean                       Clear the stash.
   fdrop --logs                      Show action logs.
+  fdrop --version                   Show the version of fdrop.
   fdrop --help                      Show this help.
+
+  Support:
+  Email: akhileshs2220@gmail.com
 `)
 }
 
@@ -268,6 +279,8 @@ func main() {
 		showLogs()
 	case "--help":
 		printHelp()
+	case "--version":
+		showVersion()
 	default:
 		fmt.Println("Invalid command. Use fdrop --help.")
 	}
