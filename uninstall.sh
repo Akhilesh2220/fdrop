@@ -5,11 +5,20 @@ BIN_DIR="/usr/local/bin"
 FILENAME="fdrop"
 INSTALL_PATH="$BIN_DIR/$FILENAME"
 
-# Check if the binary exists in the globally accessible location
+echo "Uninstalling $FILENAME from $INSTALL_PATH..."
+
+# Check if the binary exists
 if [ -f "$INSTALL_PATH" ]; then
-    sudo rm -f $INSTALL_PATH
-    echo "$FILENAME has been uninstalled."
+    sudo rm -f "$INSTALL_PATH"
+    
+    # Confirm removal
+    if [ ! -f "$INSTALL_PATH" ]; then
+        echo "✅ $FILENAME has been uninstalled successfully."
+    else
+        echo "❌ Failed to remove $FILENAME."
+        exit 1
+    fi
 else
-    echo "$FILENAME is not installed in $INSTALL_PATH."
+    echo "ℹ️  $FILENAME is not installed in $INSTALL_PATH."
 fi
 

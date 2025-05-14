@@ -1,27 +1,42 @@
 #!/bin/bash
-go build -o fdrop fdrop.go
-# fdrop installation script
-BIN_DIR="/usr/local/bin"
-FILENAME="fdrop"
-INSTALL_PATH="$BIN_DIR/$FILENAME"
 
-# Check if the binary exists in the current directory
-if [ ! -f "./$FILENAME" ]; then
-    echo "$FILENAME not found in the current directory."
+set -e
+
+BIN_DIR="/usr/local/bin"
+INSTALL_NAME="fdrop"
+BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN_FOLDER="$BASE_DIR/bin"
+
+# Detect OS
+OS="$(uname | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+
+# Normalize ARCH
+case "$ARCH" in
+    x86_64) ARCH="amd64" ;;
+    arm64|aarch64) ARCH="arm64" ;;
+    *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+# Compose binary filename
+BINARY="$BIN_FOLDER/fdrop-${OS}-${ARCH}"
+
+# Check if binary exists
+if [ ! -f "$BINARY" ]; then
+    echo "No prebuilt binary found for $OS/$ARCH."
     exit 1
 fi
 
-# Make the binary executable
-chmod +x ./$FILENAME
+# Install
+chmod +x "$BINARY"
+sudo cp "$BINARY" "$BIN_DIR/$INSTALL_NAME"
 
-# Copy the binary to a globally accessible location
-sudo cp ./$FILENAME $INSTALL_PATH
-
-# Verify the installation
-if [ -f "$INSTALL_PATH" ]; then
-    echo "$FILENAME has been installed successfully at $INSTALL_PATH."
+# Confirm
+if [ -f "$BIN_DIR/$INSTALL_NAME" ]; then
+    echo "✅ fdrop installed successfully at $BIN_DIR/$INSTALL_NAME"
+    $BIN_DIR/$INSTALL_NAME --help || true
 else
-    echo "Installation failed."
+    echo "❌ Installation failed."
     exit 1
 fi
 
