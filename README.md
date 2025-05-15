@@ -16,4 +16,4 @@ A clipboard-like file copy-paste tool for the terminal. Easily stash files and d
 
 1. Clone this repository or download the source code
 2. cd fdrop
-3. ./install
+3. ./install.sh
